@@ -169,6 +169,8 @@ export type GeometryFix = {
 export type NetworkInfo = {
   listen_host: string;
   listen_port: number;
+  https_port?: number | null;
+  https_urls?: string[];
   lan_ips: string[];
   lan_open: boolean;
   remote_log?: {

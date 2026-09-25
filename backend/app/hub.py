@@ -47,6 +47,8 @@ class RadarHub:
         self.registry = NodeRegistry()
         self.listen_host = "127.0.0.1"
         self.listen_port = 8765
+        self.listen_https_port = 8766
+        self.https_ready = False
         self.push_error: str | None = None
         self.settings.node_id = default_node_id()
         self.house = default_house()
@@ -270,6 +272,12 @@ class RadarHub:
             network={
                 "listen_host": self.listen_host,
                 "listen_port": self.listen_port,
+                "https_port": self.listen_https_port if self.https_ready else None,
+                "https_urls": [
+                    f"https://{ip}:{self.listen_https_port}"
+                    for ip in lan_addresses()
+                    if ip.startswith("192.168.")
+                ] if self.https_ready else [],
                 "lan_ips": lan_addresses(),
                 "lan_open": self.listen_host in ("0.0.0.0", "::"),
                 "remote_log": self.remote_log.status(),

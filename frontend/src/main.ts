@@ -54,7 +54,7 @@ root.innerHTML = `
         <span><i class="swatch" style="background:#d4b3ff"></i>6 GHz</span>
         <span>pulse = scan-to-scan flicker</span>
       </div>
-      <p class="radar-note" id="radar-note">Range is RSSI. Angle is body-relative after you lock an AP or enable the compass. Most desktop PCs have no gyro — use the heading slider or open this page on a phone.</p>
+      <p class="radar-note" id="radar-note">Range is RSSI. Up is facing. Chrome blocks the gyro on HTTP — use the HTTPS phone link under Network nodes, accept the warning, then Enable gyro. The heading slider always works.</p>
       <div class="radar-wrap" id="signal-wrap"><canvas id="radar"></canvas></div>
       <div class="toolbar" id="heading-bar">
         <button id="enable-gyro" type="button">Enable gyro / compass</button>
@@ -189,7 +189,7 @@ let applying = false;
 let sortKey: keyof AccessPoint | "linked" = "rssi";
 let sortDir = -1;
 let headingDeg = 0;
-let headingSource: "gyro" | "manual" | "none" = "none";
+let headingSource: "gyro" | "compass" | "manual" | "none" = "none";
 let headingLocks: Record<string, number> = {};
 try {
   headingLocks = JSON.parse(localStorage.getItem(LOCK_KEY) || "{}") as Record<string, number>;
@@ -310,7 +310,7 @@ function fillTextIfIdle(input: HTMLInputElement, value: string): void {
   if (document.activeElement !== input) input.value = value;
 }
 
-function setHeading(value: number, source: "gyro" | "manual" | "none"): void {
+function setHeading(value: number, source: "gyro" | "compass" | "manual" | "none"): void {
   headingDeg = ((value % 360) + 360) % 360;
   headingSource = source;
   if (document.activeElement !== headingIn) headingIn.value = String(Math.round(headingDeg));
@@ -324,12 +324,16 @@ function renderNodes(snap: Snapshot): void {
   const logs = (net?.remote_log?.nodes || [])
     .map((n) => `${n.id} ${n.samples} samples`)
     .join(" · ");
+  const https = (net?.https_urls || []).join(" or ");
   const listenLine = net?.lan_open
-    ? `Listening on ${listen} · LAN IPs ${ips} · other PCs can POST here. Allow TCP ${net.listen_port} in Windows Firewall.`
+    ? `Listening on ${listen} · LAN IPs ${ips} · other PCs can POST here. Allow TCP ${net.listen_port}${net.https_port ? ` and ${net.https_port}` : ""} in Windows Firewall.`
     : `Listening on ${listen} (localhost only). Restart with python -m app --host 0.0.0.0 so the laptop can push. LAN IPs: ${ips}`;
+  const httpsLine = https
+    ? ` Phone gyro: open ${https} , accept the certificate warning, then Enable gyro.`
+    : "";
   netStatus.textContent = logs
-    ? `${listenLine} Remote log: ${net?.remote_log?.directory} (${logs}).`
-    : `${listenLine} Remote snapshots are saved under recordings/remote/.`;
+    ? `${listenLine}${httpsLine} Remote log: ${net?.remote_log?.directory} (${logs}).`
+    : `${listenLine}${httpsLine} Remote snapshots are saved under recordings/remote/.`;
   nodeRows.innerHTML = (snap.nodes || [])
     .map((node) => {
       const link = node.link;
@@ -421,6 +425,11 @@ tokenIn.addEventListener("change", () => postControl({ share_token: tokenIn.valu
 pushBox.addEventListener("change", () => postControl({ push_to_hub: pushBox.checked }));
 headingIn.addEventListener("input", () => setHeading(Number(headingIn.value), "manual"));
 document.querySelector("#enable-gyro")!.addEventListener("click", () => {
+  void enableGyro().then((msg) => {
+    headingReadout.textContent = `${Math.round(headingDeg)}° · ${msg}`;
+  });
+});
+document.querySelector("#radar")!.addEventListener("click", () => {
   void enableGyro().then((msg) => {
     headingReadout.textContent = `${Math.round(headingDeg)}° · ${msg}`;
   });

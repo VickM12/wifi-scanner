@@ -37,7 +37,7 @@
           <span><i class="swatch" style="background:#d4b3ff"></i>6 GHz</span>
           <span>pulse = scan-to-scan flicker</span>
         </div>
-        <p class="radar-note">Range is RSSI. Angle is body-relative after you lock an AP or enable the compass. Most desktop PCs have no gyro — use the heading slider or open this page on a phone.</p>
+        <p class="radar-note">Range is RSSI. Up is facing. Chrome blocks the gyro on HTTP — use the HTTPS phone link under Network nodes, accept the warning, then Enable gyro. The heading slider always works.</p>
         <div class="radar-wrap" id="signal-wrap"><canvas id="radar"></canvas></div>
         <div class="toolbar" id="heading-bar">
           <button id="enable-gyro" type="button">Enable gyro / compass</button>
@@ -818,12 +818,14 @@
     const ips = (net.lan_ips || []).join(", ") || "none";
     const listen = `${net.listen_host ?? "?"}:${net.listen_port ?? 8765}`;
     const logs = (net.remote_log?.nodes || []).map((n) => `${n.id} ${n.samples} samples`).join(" · ");
+    const https = (net.https_urls || []).join(" or ");
+    const httpsLine = https ? ` Phone gyro: open ${https} , accept the certificate warning, then Enable gyro.` : "";
     const listenLine = net.lan_open
-      ? `Listening on ${listen} · LAN IPs ${ips} · other PCs can POST here. Allow TCP ${net.listen_port} in Windows Firewall.`
+      ? `Listening on ${listen} · LAN IPs ${ips} · other PCs can POST here. Allow TCP ${net.listen_port}${net.https_port ? ` and ${net.https_port}` : ""} in Windows Firewall.`
       : `Listening on ${listen} (localhost only). Restart with python -m app --host 0.0.0.0 so the laptop can push. LAN IPs: ${ips}`;
     netStatus.textContent = logs
-      ? `${listenLine} Remote log: ${net.remote_log?.directory} (${logs}).`
-      : `${listenLine} Remote snapshots are saved under recordings/remote/.`;
+      ? `${listenLine}${httpsLine} Remote log: ${net.remote_log?.directory} (${logs}).`
+      : `${listenLine}${httpsLine} Remote snapshots are saved under recordings/remote/.`;
     nodeRows.innerHTML = (snap.nodes || []).map((node) => {
       const link = node.link;
       const motion = node.motion || {};
@@ -893,23 +895,73 @@
   tokenIn.addEventListener("change", () => postJson("/api/control", { share_token: tokenIn.value }));
   pushBox.addEventListener("change", () => postJson("/api/control", { push_to_hub: pushBox.checked }));
   headingIn.addEventListener("input", () => setHeading(Number(headingIn.value), "manual"));
-  document.querySelector("#enable-gyro").addEventListener("click", () => {
-    const DOE = window.DeviceOrientationEvent;
-    const start = () => {
-      const onOrient = (ev) => {
-        const webkit = ev.webkitCompassHeading;
-        const heading = typeof webkit === "number" ? webkit : (typeof ev.alpha === "number" ? (360 - ev.alpha) % 360 : null);
-        if (heading == null) return;
-        setHeading(heading, "gyro");
-      };
-      window.addEventListener("deviceorientationabsolute", onOrient, true);
-      window.addEventListener("deviceorientation", onOrient, true);
-      headingReadout.textContent = `${Math.round(headingDeg)}° · listening for gyro / compass`;
+  let sensorsOn = false;
+  let gotOrient = false;
+  let gotMotion = false;
+  let yaw = 0;
+  let lastMotionT = 0;
+  function screenOffset() {
+    return Number((screen.orientation && screen.orientation.angle) || window.orientation || 0) || 0;
+  }
+  function startSensors() {
+    if (sensorsOn) return;
+    sensorsOn = true;
+    const onOrient = (ev) => {
+      const webkit = ev.webkitCompassHeading;
+      let heading = null;
+      if (typeof webkit === "number" && !Number.isNaN(webkit)) heading = (webkit + screenOffset() + 360) % 360;
+      else if (typeof ev.alpha === "number" && !Number.isNaN(ev.alpha)) heading = (360 - ev.alpha + screenOffset()) % 360;
+      if (heading == null) return;
+      gotOrient = true;
+      yaw = heading;
+      setHeading(heading, "compass");
     };
-    if (DOE && typeof DOE.requestPermission === "function") {
-      DOE.requestPermission().then((state) => { if (state === "granted") start(); });
-    } else start();
-  });
+    const onMotion = (ev) => {
+      const rate = ev.rotationRate;
+      if (!rate) return;
+      const now = performance.now();
+      const dt = lastMotionT ? Math.min(0.1, (now - lastMotionT) / 1000) : 0;
+      lastMotionT = now;
+      if (!dt || gotOrient) return;
+      const grav = ev.accelerationIncludingGravity;
+      const flat = Math.abs(grav && grav.z ? grav.z : 0) > 8;
+      const spin = flat ? rate.alpha : (rate.alpha != null ? rate.alpha : rate.gamma);
+      if (typeof spin !== "number" || Number.isNaN(spin)) return;
+      gotMotion = true;
+      yaw = (yaw + spin * dt + 360) % 360;
+      setHeading(yaw, "gyro");
+    };
+    window.addEventListener("deviceorientationabsolute", onOrient, true);
+    window.addEventListener("deviceorientation", onOrient, true);
+    window.addEventListener("devicemotion", onMotion, true);
+    headingReadout.textContent = `${Math.round(headingDeg)}° · listening for gyro / compass`;
+    setTimeout(() => {
+      if (gotOrient || gotMotion) return;
+      const insecure = location.protocol !== "https:" && location.hostname !== "localhost" && location.hostname !== "127.0.0.1";
+      headingReadout.textContent = insecure
+        ? `${Math.round(headingDeg)}° · Chrome blocks sensors on HTTP. Open the HTTPS phone link, accept the warning, tap Enable again`
+        : `${Math.round(headingDeg)}° · no sensor events — allow motion permission, or drag the heading slider`;
+    }, 1200);
+  }
+  async function enableSensors() {
+    const DOE = window.DeviceOrientationEvent;
+    const DME = window.DeviceMotionEvent;
+    try {
+      if (DOE && typeof DOE.requestPermission === "function") {
+        const state = await DOE.requestPermission();
+        if (state !== "granted") { headingReadout.textContent = "orientation permission denied — use the heading slider"; return; }
+      }
+      if (DME && typeof DME.requestPermission === "function") {
+        const state = await DME.requestPermission();
+        if (state !== "granted") { headingReadout.textContent = "motion permission denied — use the heading slider"; return; }
+      }
+    } catch (err) {
+      headingReadout.textContent = "sensor permission failed — use the heading slider";
+    }
+    startSensors();
+  }
+  document.querySelector("#enable-gyro").addEventListener("click", () => { void enableSensors(); });
+  document.querySelector("#radar").addEventListener("click", () => { void enableSensors(); });
   document.querySelector("#lock-ahead").addEventListener("click", () => {
     const bssid = latest?.link?.bssid;
     if (!bssid) { headingReadout.textContent = `${Math.round(headingDeg)}° · no linked AP`; return; }
