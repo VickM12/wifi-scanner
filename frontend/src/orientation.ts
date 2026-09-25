@@ -6,10 +6,21 @@ const listeners = new Set<HeadingListener>();
 let started = false;
 let lastGyro: number | null = null;
 let lastSource: HeadingSource = "none";
-let yaw = 0;
+let fused = 0;
 let lastMotionT = 0;
+let lastAbsT = 0;
 let gotOrient = false;
 let gotMotion = false;
+let haveAbsolute = false;
+let compass: number | null = null;
+
+function wrap360(value: number): number {
+  return ((value % 360) + 360) % 360;
+}
+
+function deltaDeg(from: number, to: number): number {
+  return ((to - from + 540) % 360) - 180;
+}
 
 function emit(heading: number, source: HeadingSource): void {
   lastGyro = heading;
@@ -25,35 +36,65 @@ function screenOffset(): number {
 function fromOrient(ev: DeviceOrientationEvent): number | null {
   const webkit = (ev as DeviceOrientationEvent & { webkitCompassHeading?: number }).webkitCompassHeading;
   if (typeof webkit === "number" && !Number.isNaN(webkit)) {
-    return (webkit + screenOffset() + 360) % 360;
+    return wrap360(webkit + screenOffset());
   }
   if (typeof ev.alpha !== "number" || Number.isNaN(ev.alpha)) return null;
-  return (360 - ev.alpha + screenOffset()) % 360;
+  return wrap360(360 - ev.alpha + screenOffset());
+}
+
+function isAbsolute(ev: DeviceOrientationEvent): boolean {
+  return ev.type === "deviceorientationabsolute" || ev.absolute === true;
 }
 
 function onOrient(ev: DeviceOrientationEvent): void {
+  const now = performance.now();
+  const abs = isAbsolute(ev);
+  if (abs) {
+    haveAbsolute = true;
+    lastAbsT = now;
+  } else if (haveAbsolute && now - lastAbsT < 500) {
+    return;
+  }
   const heading = fromOrient(ev);
   if (heading == null) return;
+  if (!gotOrient) fused = heading;
   gotOrient = true;
-  yaw = heading;
-  emit(heading, "compass");
+  compass = heading;
+  if (!gotMotion) {
+    fused = wrap360(fused + deltaDeg(fused, heading) * 0.35);
+    emit(fused, "compass");
+  }
 }
 
 function onMotion(ev: DeviceMotionEvent): void {
   const rate = ev.rotationRate;
-  if (!rate) return;
   const now = performance.now();
-  const dt = lastMotionT ? Math.min(0.1, (now - lastMotionT) / 1000) : 0;
+  const dt = lastMotionT ? Math.min(0.08, (now - lastMotionT) / 1000) : 0;
   lastMotionT = now;
   if (!dt) return;
-  const grav = ev.accelerationIncludingGravity;
-  const flat = Math.abs(grav?.z ?? 0) > 8;
-  const spin = flat ? rate.alpha : (rate.alpha ?? rate.gamma);
-  if (typeof spin !== "number" || Number.isNaN(spin)) return;
-  gotMotion = true;
-  if (gotOrient) return;
-  yaw = (yaw + spin * dt + 360) % 360;
-  emit(yaw, "gyro");
+
+  let spin: number | null = null;
+  if (rate) {
+    const grav = ev.accelerationIncludingGravity;
+    const flat = Math.abs(grav?.z ?? 0) > 8;
+    const raw = flat ? rate.alpha : (rate.alpha ?? rate.gamma);
+    if (typeof raw === "number" && !Number.isNaN(raw)) spin = raw;
+  }
+
+  if (spin != null) {
+    gotMotion = true;
+    fused = wrap360(fused + (gotOrient ? -spin : spin) * dt);
+  }
+
+  if (compass != null) {
+    const turning = spin != null && Math.abs(spin) > 25;
+    const gain = Math.min(1, (turning ? 1.1 : 5) * dt);
+    fused = wrap360(fused + deltaDeg(fused, compass) * gain);
+  }
+
+  if (gotOrient || gotMotion) {
+    emit(fused, gotOrient ? "compass" : "gyro");
+  }
 }
 
 export function onHeading(listener: HeadingListener): () => void {

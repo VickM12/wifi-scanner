@@ -313,8 +313,15 @@ function fillTextIfIdle(input: HTMLInputElement, value: string): void {
 function setHeading(value: number, source: "gyro" | "compass" | "manual" | "none"): void {
   headingDeg = ((value % 360) + 360) % 360;
   headingSource = source;
-  if (document.activeElement !== headingIn) headingIn.value = String(Math.round(headingDeg));
-  headingReadout.textContent = `${Math.round(headingDeg)}° · ${source}`;
+}
+
+function syncHeadingUi(): void {
+  const rounded = Math.round(headingDeg);
+  if (document.activeElement !== headingIn && headingIn.value !== String(rounded)) {
+    headingIn.value = String(rounded);
+  }
+  const label = `${rounded}° · ${headingSource}`;
+  if (headingReadout.textContent !== label) headingReadout.textContent = label;
 }
 
 function renderNodes(snap: Snapshot): void {
@@ -488,6 +495,7 @@ function frame(): void {
   if (headingSource === "none" && snap?.heading != null) {
     setHeading(snap.heading, "gyro");
   }
+  syncHeadingUi();
   radar.draw(snap?.aps ?? [], now, headingDeg, headingLocks);
   wave.draw(snap?.settings.threshold ?? 0.35, Boolean(snap?.motion?.active));
   csi.draw(snap?.csi_status || "CSI source not connected");

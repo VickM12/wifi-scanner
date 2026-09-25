@@ -171,9 +171,11 @@
     const dpr = window.devicePixelRatio || 1;
     const w = canvas.clientWidth;
     const h = canvas.clientHeight;
-    if (canvas.width !== Math.floor(w * dpr) || canvas.height !== Math.floor(h * dpr)) {
-      canvas.width = Math.floor(w * dpr);
-      canvas.height = Math.floor(h * dpr);
+    const tw = Math.floor(w * dpr);
+    const th = Math.floor(h * dpr);
+    if (Math.abs(canvas.width - tw) > 2 || Math.abs(canvas.height - th) > 2) {
+      canvas.width = tw;
+      canvas.height = th;
     }
     const ctx = canvas.getContext("2d");
     if (!ctx) return null;
@@ -187,12 +189,20 @@
       this.sweep = 0;
       this.pulses = new Map();
       this.radii = new Map();
+      this.drawnHeading = null;
     }
     draw(aps, now, heading = 0, locks = {}) {
       const fitted = fit(this.canvas);
       if (!fitted) return;
       const { ctx, w, h } = fitted;
       ctx.clearRect(0, 0, w, h);
+      if (this.drawnHeading == null) this.drawnHeading = heading;
+      else {
+        let step = ((heading - this.drawnHeading) % 360 + 360) % 360;
+        if (step > 180) step -= 360;
+        this.drawnHeading = ((this.drawnHeading + step * 0.28) % 360 + 360) % 360;
+      }
+      heading = this.drawnHeading;
       const cx = w / 2;
       const cy = h / 2;
       const maxR = Math.min(cx, cy) - 18;
@@ -591,8 +601,12 @@
   function setHeading(value, source) {
     headingDeg = ((value % 360) + 360) % 360;
     headingSource = source;
-    if (document.activeElement !== headingIn) headingIn.value = String(Math.round(headingDeg));
-    headingReadout.textContent = `${Math.round(headingDeg)}° · ${source}`;
+  }
+  function syncHeadingUi() {
+    const rounded = Math.round(headingDeg);
+    if (document.activeElement !== headingIn && headingIn.value !== String(rounded)) headingIn.value = String(rounded);
+    const label = `${rounded}° · ${headingSource}`;
+    if (headingReadout.textContent !== label) headingReadout.textContent = label;
   }
   const statusEl = document.querySelector("#status");
   const badge = document.querySelector("#motion-badge");
@@ -898,8 +912,13 @@
   let sensorsOn = false;
   let gotOrient = false;
   let gotMotion = false;
-  let yaw = 0;
+  let fused = 0;
   let lastMotionT = 0;
+  let lastAbsT = 0;
+  let haveAbsolute = false;
+  let compass = null;
+  function wrap360(value) { return ((value % 360) + 360) % 360; }
+  function deltaDeg(from, to) { return ((to - from + 540) % 360) - 180; }
   function screenOffset() {
     return Number((screen.orientation && screen.orientation.angle) || window.orientation || 0) || 0;
   }
@@ -907,29 +926,46 @@
     if (sensorsOn) return;
     sensorsOn = true;
     const onOrient = (ev) => {
+      const now = performance.now();
+      const abs = ev.type === "deviceorientationabsolute" || ev.absolute === true;
+      if (abs) { haveAbsolute = true; lastAbsT = now; }
+      else if (haveAbsolute && now - lastAbsT < 500) return;
       const webkit = ev.webkitCompassHeading;
       let heading = null;
-      if (typeof webkit === "number" && !Number.isNaN(webkit)) heading = (webkit + screenOffset() + 360) % 360;
-      else if (typeof ev.alpha === "number" && !Number.isNaN(ev.alpha)) heading = (360 - ev.alpha + screenOffset()) % 360;
+      if (typeof webkit === "number" && !Number.isNaN(webkit)) heading = wrap360(webkit + screenOffset());
+      else if (typeof ev.alpha === "number" && !Number.isNaN(ev.alpha)) heading = wrap360(360 - ev.alpha + screenOffset());
       if (heading == null) return;
+      if (!gotOrient) fused = heading;
       gotOrient = true;
-      yaw = heading;
-      setHeading(heading, "compass");
+      compass = heading;
+      if (!gotMotion) {
+        fused = wrap360(fused + deltaDeg(fused, heading) * 0.35);
+        setHeading(fused, "compass");
+      }
     };
     const onMotion = (ev) => {
       const rate = ev.rotationRate;
-      if (!rate) return;
       const now = performance.now();
-      const dt = lastMotionT ? Math.min(0.1, (now - lastMotionT) / 1000) : 0;
+      const dt = lastMotionT ? Math.min(0.08, (now - lastMotionT) / 1000) : 0;
       lastMotionT = now;
-      if (!dt || gotOrient) return;
-      const grav = ev.accelerationIncludingGravity;
-      const flat = Math.abs(grav && grav.z ? grav.z : 0) > 8;
-      const spin = flat ? rate.alpha : (rate.alpha != null ? rate.alpha : rate.gamma);
-      if (typeof spin !== "number" || Number.isNaN(spin)) return;
-      gotMotion = true;
-      yaw = (yaw + spin * dt + 360) % 360;
-      setHeading(yaw, "gyro");
+      if (!dt) return;
+      let spin = null;
+      if (rate) {
+        const grav = ev.accelerationIncludingGravity;
+        const flat = Math.abs(grav && grav.z != null ? grav.z : 0) > 8;
+        const raw = flat ? rate.alpha : (rate.alpha != null ? rate.alpha : rate.gamma);
+        if (typeof raw === "number" && !Number.isNaN(raw)) spin = raw;
+      }
+      if (spin != null) {
+        gotMotion = true;
+        fused = wrap360(fused + (gotOrient ? -spin : spin) * dt);
+      }
+      if (compass != null) {
+        const turning = spin != null && Math.abs(spin) > 25;
+        const gain = Math.min(1, (turning ? 1.1 : 5) * dt);
+        fused = wrap360(fused + deltaDeg(fused, compass) * gain);
+      }
+      if (gotOrient || gotMotion) setHeading(fused, gotOrient ? "compass" : "gyro");
     };
     window.addEventListener("deviceorientationabsolute", onOrient, true);
     window.addEventListener("deviceorientation", onOrient, true);
@@ -997,6 +1033,7 @@
     const snap = latest;
     const now = performance.now() / 1000;
     if (headingSource === "none" && snap?.heading != null) setHeading(snap.heading, "gyro");
+    syncHeadingUi();
     radar.draw(snap?.aps ?? [], now, headingDeg, headingLocks);
     wave.draw(snap?.settings?.threshold ?? 0.35, Boolean(snap?.motion?.active));
     csi.draw(snap?.csi_status || "CSI source not connected");

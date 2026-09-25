@@ -22,6 +22,7 @@ export class RadarView {
   private sweep = 0;
   private pulses = new Map<string, number>();
   private radii = new Map<string, number>();
+  private drawnHeading: number | null = null;
 
   constructor(private canvas: HTMLCanvasElement) {}
 
@@ -31,23 +32,33 @@ export class RadarView {
     const dpr = window.devicePixelRatio || 1;
     const cssW = this.canvas.clientWidth;
     const cssH = this.canvas.clientHeight;
-    if (this.canvas.width !== Math.floor(cssW * dpr) || this.canvas.height !== Math.floor(cssH * dpr)) {
-      this.canvas.width = Math.floor(cssW * dpr);
-      this.canvas.height = Math.floor(cssH * dpr);
+    const tw = Math.floor(cssW * dpr);
+    const th = Math.floor(cssH * dpr);
+    if (Math.abs(this.canvas.width - tw) > 2 || Math.abs(this.canvas.height - th) > 2) {
+      this.canvas.width = tw;
+      this.canvas.height = th;
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
+
+    if (this.drawnHeading == null) this.drawnHeading = heading;
+    else {
+      let step = ((heading - this.drawnHeading) % 360 + 360) % 360;
+      if (step > 180) step -= 360;
+      this.drawnHeading = wrapDeg(this.drawnHeading + step * 0.28);
+    }
+    const plotHeading = this.drawnHeading;
 
     const cx = cssW / 2;
     const cy = cssH / 2;
     const maxR = Math.min(cx, cy) - 18;
     this.sweep = (this.sweep + 0.012) % (Math.PI * 2);
 
-    this.rings(ctx, cx, cy, maxR, heading);
+    this.rings(ctx, cx, cy, maxR, plotHeading);
     this.drawSweep(ctx, cx, cy, maxR);
 
     for (const ap of aps) {
-      const rel = relativeBearing(worldBearing(ap, locks), heading);
+      const rel = relativeBearing(worldBearing(ap, locks), plotHeading);
       const rad = (rel * Math.PI) / 180;
       const rssi = ap.smoothed_rssi ?? ap.rssi;
       const target = rssiRadius(rssi, maxR);
