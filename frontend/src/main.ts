@@ -1,4 +1,5 @@
 import { CsiHeatmap } from "./csi";
+import { enableGyro, onHeading } from "./orientation";
 import { RadarView } from "./radar";
 import { formatDbm } from "./rf";
 import "./styles.css";
@@ -26,7 +27,7 @@ root.innerHTML = `
   <header>
     <div>
       <h1>WiFi Radar</h1>
-      <p class="sub">Laptop at the center. Blip range is a path-loss guess from RSSI; angle is a stable BSSID hash, not a compass bearing.</p>
+      <p class="sub">You are the center. Up on the radar is the way you are facing. Gyro/compass rotates the plot; lock the linked AP ahead so a turn puts it behind you.</p>
     </div>
     <div class="controls">
       <button id="toggle-run" type="button">Pause</button>
@@ -53,8 +54,16 @@ root.innerHTML = `
         <span><i class="swatch" style="background:#d4b3ff"></i>6 GHz</span>
         <span>pulse = scan-to-scan flicker</span>
       </div>
-      <p class="radar-note">Radial distance represents signal strength only. Angular position is for visual separation and does not represent physical direction.</p>
-      <div class="radar-wrap"><canvas id="radar"></canvas></div>
+      <p class="radar-note" id="radar-note">Range is RSSI. Angle is body-relative after you lock an AP or enable the compass. Most desktop PCs have no gyro — use the heading slider or open this page on a phone.</p>
+      <div class="radar-wrap" id="signal-wrap"><canvas id="radar"></canvas></div>
+      <div class="toolbar" id="heading-bar">
+        <button id="enable-gyro" type="button">Enable gyro / compass</button>
+        <button id="lock-ahead" type="button">Lock linked AP ahead</button>
+        <label>Heading
+          <input id="heading" type="range" min="0" max="359" step="1" value="0" />
+        </label>
+        <span id="heading-readout" class="hint">0° · manual</span>
+      </div>
     </section>
     <div class="stack">
       <section class="panel">
@@ -89,7 +98,7 @@ root.innerHTML = `
       </section>
       <section class="panel">
         <h2>Network nodes</h2>
-        <p class="radar-note">Each machine is its own radio. Shared snapshots are RSSI + motion + AP list. Position is empty until you add rooms later.</p>
+        <p class="radar-note">Each machine is its own radio. Shared snapshots are RSSI + motion + AP list.</p>
         <div class="toolbar">
           <label>Name <input id="node-id" type="text" /></label>
           <label>Hub URL <input id="hub-url" type="text" placeholder="http://192.168.1.20:8765" /></label>
@@ -146,6 +155,9 @@ root.innerHTML = `
 const radar = new RadarView(document.querySelector("#radar")!);
 const wave = new WaveformView(document.querySelector("#wave")!);
 const csi = new CsiHeatmap(document.querySelector("#csi")!);
+const headingIn = document.querySelector("#heading") as HTMLInputElement;
+const headingReadout = document.querySelector("#heading-readout")!;
+const LOCK_KEY = "radar-ap-bearings";
 const statusEl = document.querySelector("#status")!;
 const badge = document.querySelector("#motion-badge")!;
 const rows = document.querySelector("#ap-rows")!;
@@ -176,6 +188,14 @@ let latest: Snapshot | null = null;
 let applying = false;
 let sortKey: keyof AccessPoint | "linked" = "rssi";
 let sortDir = -1;
+let headingDeg = 0;
+let headingSource: "gyro" | "manual" | "none" = "none";
+let headingLocks: Record<string, number> = {};
+try {
+  headingLocks = JSON.parse(localStorage.getItem(LOCK_KEY) || "{}") as Record<string, number>;
+} catch {
+  headingLocks = {};
+}
 
 function wsUrl(): string {
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -202,7 +222,9 @@ function ingest(snap: Snapshot): void {
   if (snap.link) wave.push(snap.t, snap.link.rssi, snap.motion);
   if (snap.csi) csi.push(snap.csi);
   else csi.clear();
-  if (!applying) syncControls(snap);
+  if (!applying) {
+    syncControls(snap);
+  }
   renderTable(snap);
   renderNodes(snap);
   renderMetrics(snap);
@@ -288,13 +310,26 @@ function fillTextIfIdle(input: HTMLInputElement, value: string): void {
   if (document.activeElement !== input) input.value = value;
 }
 
+function setHeading(value: number, source: "gyro" | "manual" | "none"): void {
+  headingDeg = ((value % 360) + 360) % 360;
+  headingSource = source;
+  if (document.activeElement !== headingIn) headingIn.value = String(Math.round(headingDeg));
+  headingReadout.textContent = `${Math.round(headingDeg)}° · ${source}`;
+}
+
 function renderNodes(snap: Snapshot): void {
   const net = snap.network;
   const ips = (net?.lan_ips || []).join(", ") || "none";
   const listen = `${net?.listen_host ?? "?"}:${net?.listen_port ?? 8765}`;
-  netStatus.textContent = net?.lan_open
+  const logs = (net?.remote_log?.nodes || [])
+    .map((n) => `${n.id} ${n.samples} samples`)
+    .join(" · ");
+  const listenLine = net?.lan_open
     ? `Listening on ${listen} · LAN IPs ${ips} · other PCs can POST here. Allow TCP ${net.listen_port} in Windows Firewall.`
     : `Listening on ${listen} (localhost only). Restart with python -m app --host 0.0.0.0 so the laptop can push. LAN IPs: ${ips}`;
+  netStatus.textContent = logs
+    ? `${listenLine} Remote log: ${net?.remote_log?.directory} (${logs}).`
+    : `${listenLine} Remote snapshots are saved under recordings/remote/.`;
   nodeRows.innerHTML = (snap.nodes || [])
     .map((node) => {
       const link = node.link;
@@ -384,6 +419,23 @@ nodeIdIn.addEventListener("change", () => postControl({ node_id: nodeIdIn.value 
 hubUrlIn.addEventListener("change", () => postControl({ hub_url: hubUrlIn.value || null }));
 tokenIn.addEventListener("change", () => postControl({ share_token: tokenIn.value }));
 pushBox.addEventListener("change", () => postControl({ push_to_hub: pushBox.checked }));
+headingIn.addEventListener("input", () => setHeading(Number(headingIn.value), "manual"));
+document.querySelector("#enable-gyro")!.addEventListener("click", () => {
+  void enableGyro().then((msg) => {
+    headingReadout.textContent = `${Math.round(headingDeg)}° · ${msg}`;
+  });
+});
+document.querySelector("#lock-ahead")!.addEventListener("click", () => {
+  const bssid = latest?.link?.bssid;
+  if (!bssid) {
+    headingReadout.textContent = `${Math.round(headingDeg)}° · no linked AP`;
+    return;
+  }
+  headingLocks[bssid.toLowerCase()] = headingDeg;
+  localStorage.setItem(LOCK_KEY, JSON.stringify(headingLocks));
+  headingReadout.textContent = `${Math.round(headingDeg)}° · locked ${bssid.slice(-8)} ahead`;
+});
+onHeading((value, source) => setHeading(value, source));
 
 document.querySelector("#cal-start")!.addEventListener("click", () => {
   void postJson("/api/calibrate", { action: "start" });
@@ -424,7 +476,10 @@ document.querySelectorAll<HTMLTableCellElement>("th[data-sort]").forEach((th) =>
 function frame(): void {
   const snap = latest;
   const now = performance.now() / 1000;
-  radar.draw(snap?.aps ?? [], now);
+  if (headingSource === "none" && snap?.heading != null) {
+    setHeading(snap.heading, "gyro");
+  }
+  radar.draw(snap?.aps ?? [], now, headingDeg, headingLocks);
   wave.draw(snap?.settings.threshold ?? 0.35, Boolean(snap?.motion?.active));
   csi.draw(snap?.csi_status || "CSI source not connected");
   requestAnimationFrame(frame);

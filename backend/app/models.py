@@ -18,6 +18,7 @@ class AccessPoint:
     variance: float = 0.0
     smoothed_rssi: float | None = None
     last_seen: float | None = None
+    bearing_deg: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -131,6 +132,9 @@ class Snapshot:
     csi_status: str = "CSI source not connected"
     nodes: list[dict[str, Any]] = field(default_factory=list)
     network: dict[str, Any] = field(default_factory=dict)
+    house: dict[str, Any] = field(default_factory=dict)
+    fix: dict[str, Any] | None = None
+    heading: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -148,4 +152,7 @@ class Snapshot:
             "csi_status": self.csi_status,
             "nodes": self.nodes,
             "network": self.network,
+            "house": self.house,
+            "fix": self.fix,
+            "heading": self.heading,
         }

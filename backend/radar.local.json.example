@@ -2,5 +2,36 @@
   "node_id": "scanner-1",
   "hub_url": null,
   "share_token": "",
-  "push_to_hub": false
+  "push_to_hub": false,
+  "house": {
+    "footprint": { "w": 12, "d": 10 },
+    "floors": [
+      { "id": "1", "name": "1", "z": 0, "w": 12, "d": 10 },
+      { "id": "2", "name": "2", "z": 3, "w": 12, "d": 10 },
+      { "id": "3", "name": "3", "z": 6, "w": 12, "d": 10 }
+    ],
+    "rooms": [
+      { "id": "living", "name": "living", "floor": "1", "z": 0, "x": 0, "y": 0, "w": 6, "d": 10 },
+      { "id": "bedroom", "name": "bedroom", "floor": "2", "z": 3, "x": 0, "y": 1.5, "w": 6, "d": 7 },
+      { "id": "office", "name": "office", "floor": "3", "z": 6, "x": 0, "y": 0, "w": 4.5, "d": 5 }
+    ],
+    "anchors": [
+      {
+        "id": "deco-a",
+        "label": "bedroom Deco",
+        "floor": "2",
+        "x": 4.2,
+        "y": 4,
+        "bssids": ["aa:bb:cc:dd:ee:15", "aa:bb:cc:dd:ee:14"]
+      },
+      {
+        "id": "deco-b",
+        "label": "living Deco",
+        "floor": "1",
+        "x": 2.4,
+        "y": 7.5,
+        "bssids": ["aa:bb:cc:dd:ee:45", "aa:bb:cc:dd:ee:44"]
+      }
+    ]
+  }
 }

@@ -13,9 +13,12 @@ from .collectors.base import RadioCollector
 from .csi_sources import CsiSourceHub, Esp32CsiSource
 from .models import AccessPoint, AppSettings, LinkSample, MotionResult, Snapshot
 from .motion import MotionConfig, MotionDetector
+from .geometry import default_house, estimate_fix, normalize_house
+from .heading import read_heading_deg
 from .local_config import load_local, save_local
 from .nodes import NodeRegistry, build_node_report, default_node_id, lan_addresses
 from .recording import ExperimentRecorder
+from .remote_log import RemoteNodeLog
 from .rf import freq_mhz_to_channel
 
 
@@ -30,6 +33,7 @@ class RadarHub:
         self.motion = MotionDetector(config=self._motion_config())
         self.csi_hub = CsiSourceHub(Esp32CsiSource(port=self.settings.csi_port))
         self.recorder = ExperimentRecorder(RECORDINGS_DIR)
+        self.remote_log = RemoteNodeLog(RECORDINGS_DIR / "remote")
         self.collector: RadioCollector = create_collector(demo=False)
         self.aps: list[AccessPoint] = []
         self.interfaces = []
@@ -45,6 +49,9 @@ class RadarHub:
         self.listen_port = 8765
         self.push_error: str | None = None
         self.settings.node_id = default_node_id()
+        self.house = default_house()
+        self._heading: float | None = None
+        self._heading_t = 0.0
         self._apply_local(load_local())
         self._lock = asyncio.Lock()
         self._tasks: list[asyncio.Task] = []
@@ -73,9 +80,11 @@ class RadarHub:
             self.settings.share_token = str(data["share_token"])
         if "push_to_hub" in data and data["push_to_hub"] is not None:
             self.settings.push_to_hub = bool(data["push_to_hub"])
+        if "house" in data and data["house"] is not None:
+            self.house = normalize_house(data["house"])
 
     def persist_local(self) -> None:
-        save_local(self.settings)
+        save_local(self.settings, house=self.house)
 
     async def start(self) -> None:
         if self._started:
@@ -139,6 +148,8 @@ class RadarHub:
                 self.settings.share_token = str(changes["share_token"])
             if "push_to_hub" in changes and changes["push_to_hub"] is not None:
                 self.settings.push_to_hub = bool(changes["push_to_hub"])
+            if "house" in changes and changes["house"] is not None:
+                self.house = normalize_house(changes["house"])
             self._sync_motion_config()
             self.persist_local()
             if rebuild:
@@ -203,18 +214,27 @@ class RadarHub:
     def ingest_node(self, report: dict, token: str | None = None) -> dict:
         if not self.token_ok(token):
             raise PermissionError("share token mismatch")
-        return self.registry.ingest(report)
+        stored = self.registry.ingest(report)
+        fix = estimate_fix(self.house, stored.get("aps") or [], stored.get("link"))
+        stored["position"] = fix
+        remote_id = str(stored.get("id") or "")
+        local_id = self.settings.node_id or default_node_id()
+        if remote_id and remote_id != local_id:
+            self.remote_log.append(stored, float(stored.get("recv_t") or time.time()))
+        return stored
 
     def local_report(self, now: float | None = None) -> dict:
         stamp = now if now is not None else time.time()
         motion = self._last_motion.to_dict() if self._last_motion else None
+        aps = [ap.to_dict() for ap in self.aps]
+        link = self._link.to_dict() if self._link else None
         return build_node_report(
             node_id=self.settings.node_id or default_node_id(),
             t=stamp,
-            link=self._link.to_dict() if self._link else None,
+            link=link,
             motion=motion,
-            aps=[ap.to_dict() for ap in self.aps],
-            position=None,
+            aps=aps,
+            position=estimate_fix(self.house, aps, link),
             local=True,
         )
 
@@ -252,8 +272,18 @@ class RadarHub:
                 "listen_port": self.listen_port,
                 "lan_ips": lan_addresses(),
                 "lan_open": self.listen_host in ("0.0.0.0", "::"),
+                "remote_log": self.remote_log.status(),
             },
+            house=self.house,
+            fix=local.get("position"),
+            heading=self._heading_now(now),
         )
+
+    def _heading_now(self, now: float) -> float | None:
+        if now - self._heading_t > 0.5:
+            self._heading = read_heading_deg()
+            self._heading_t = now
+        return self._heading
 
     async def register(self, ws: WebSocket) -> None:
         await ws.accept()

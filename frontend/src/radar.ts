@@ -1,6 +1,23 @@
 import { bandColor, bssidAngle, rssiRadius } from "./rf";
 import type { AccessPoint } from "./types";
 
+function wrapDeg(value: number): number {
+  return ((value % 360) + 360) % 360;
+}
+
+function relativeBearing(world: number, heading: number): number {
+  let rel = ((world - heading) % 360 + 360) % 360;
+  if (rel > 180) rel -= 360;
+  return rel;
+}
+
+function worldBearing(ap: AccessPoint, locks: Record<string, number>): number {
+  const key = ap.bssid.toLowerCase();
+  if (locks[key] != null) return locks[key];
+  if (ap.bearing_deg != null) return ap.bearing_deg;
+  return (bssidAngle(ap.bssid) / (Math.PI * 2)) * 360;
+}
+
 export class RadarView {
   private sweep = 0;
   private pulses = new Map<string, number>();
@@ -8,7 +25,7 @@ export class RadarView {
 
   constructor(private canvas: HTMLCanvasElement) {}
 
-  draw(aps: AccessPoint[], now: number): void {
+  draw(aps: AccessPoint[], now: number, heading: number, locks: Record<string, number>): void {
     const ctx = this.canvas.getContext("2d");
     if (!ctx) return;
     const dpr = window.devicePixelRatio || 1;
@@ -26,18 +43,19 @@ export class RadarView {
     const maxR = Math.min(cx, cy) - 18;
     this.sweep = (this.sweep + 0.012) % (Math.PI * 2);
 
-    this.rings(ctx, cx, cy, maxR);
+    this.rings(ctx, cx, cy, maxR, heading);
     this.drawSweep(ctx, cx, cy, maxR);
 
     for (const ap of aps) {
-      const angle = bssidAngle(ap.bssid);
+      const rel = relativeBearing(worldBearing(ap, locks), heading);
+      const rad = (rel * Math.PI) / 180;
       const rssi = ap.smoothed_rssi ?? ap.rssi;
       const target = rssiRadius(rssi, maxR);
       const prevR = this.radii.get(ap.bssid) ?? target;
       const r = prevR + (target - prevR) * 0.14;
       this.radii.set(ap.bssid, r);
-      const x = cx + Math.cos(angle) * r;
-      const y = cy + Math.sin(angle) * r;
+      const x = cx + Math.sin(rad) * r;
+      const y = cy - Math.cos(rad) * r;
       const flicker = ap.variance > 1.1 || (ap.linked && ap.variance > 0.4);
       const prev = this.pulses.get(ap.bssid) ?? 0;
       const pulse = flicker ? Math.min(1, prev + 0.08) : Math.max(0, prev - 0.04);
@@ -47,15 +65,18 @@ export class RadarView {
 
     ctx.fillStyle = "#e8fff4";
     ctx.beginPath();
-    ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+    ctx.moveTo(cx, cy - 11);
+    ctx.lineTo(cx - 6, cy + 7);
+    ctx.lineTo(cx + 6, cy + 7);
+    ctx.closePath();
     ctx.fill();
-    ctx.fillStyle = "rgba(232,255,244,0.55)";
+    ctx.fillStyle = "rgba(232,255,244,0.7)";
     ctx.font = "12px 'Segoe UI', sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText("you", cx, cy + 18);
+    ctx.fillText("you · facing", cx, cy + 22);
   }
 
-  private rings(ctx: CanvasRenderingContext2D, cx: number, cy: number, maxR: number): void {
+  private rings(ctx: CanvasRenderingContext2D, cx: number, cy: number, maxR: number, heading: number): void {
     ctx.save();
     ctx.strokeStyle = "rgba(110, 230, 170, 0.18)";
     ctx.fillStyle = "rgba(8, 18, 16, 0.92)";
@@ -69,16 +90,23 @@ export class RadarView {
       ctx.stroke();
     }
     ctx.beginPath();
-    ctx.moveTo(cx - maxR, cy);
-    ctx.lineTo(cx + maxR, cy);
     ctx.moveTo(cx, cy - maxR);
     ctx.lineTo(cx, cy + maxR);
+    ctx.moveTo(cx - maxR, cy);
+    ctx.lineTo(cx + maxR, cy);
     ctx.stroke();
-    ctx.fillStyle = "rgba(150, 190, 170, 0.45)";
+    ctx.fillStyle = "rgba(150, 190, 170, 0.7)";
     ctx.font = "11px 'Segoe UI', sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("FWD", cx, cy - maxR + 14);
+    const nRad = ((0 - heading) * Math.PI) / 180;
+    ctx.fillStyle = "#ffc46b";
+    ctx.fillText("N", cx + Math.sin(nRad) * (maxR - 14), cy - Math.cos(nRad) * (maxR - 14) + 4);
+    ctx.fillStyle = "rgba(150, 190, 170, 0.45)";
     ctx.textAlign = "left";
     ctx.fillText("−25 dBm", cx + 8, cy - maxR * 0.08);
     ctx.fillText("−95 dBm", cx + 8, cy - maxR + 12);
+    ctx.fillText(`${Math.round(wrapDeg(heading))}°`, cx + 8, cy + maxR - 8);
     ctx.restore();
   }
 

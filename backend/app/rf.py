@@ -79,3 +79,21 @@ def bssid_angle(bssid: str) -> float:
 
 def rssi_to_meters(rssi: float, tx_power_dbm: float = 20.0, path_loss_n: float = 3.0) -> float:
     return 10 ** ((tx_power_dbm - rssi) / (10.0 * path_loss_n))
+
+
+def wrap_deg(value: float) -> float:
+    return value % 360.0
+
+
+def relative_bearing_deg(world_deg: float, heading_deg: float) -> float:
+    """0 = ahead, +90 = right, 180 = behind, -90 = left."""
+    rel = (world_deg - heading_deg) % 360.0
+    if rel > 180.0:
+        rel -= 360.0
+    return rel
+
+
+def radar_offset(rel_deg: float, radius: float) -> tuple[float, float]:
+    """Screen offset: up is facing, clockwise is right."""
+    rad = math.radians(rel_deg)
+    return math.sin(rad) * radius, -math.cos(rad) * radius

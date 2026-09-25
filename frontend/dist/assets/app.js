@@ -10,7 +10,7 @@
     <header>
       <div>
         <h1>WiFi Radar</h1>
-        <p class="sub">Laptop at the center. Blip range is a path-loss guess from RSSI; angle is a stable BSSID hash, not a compass bearing.</p>
+        <p class="sub">You are the center. Up on the radar is the way you are facing. Gyro/compass rotates the plot; lock the linked AP ahead so a turn puts it behind you.</p>
       </div>
       <div class="controls">
         <button id="toggle-run" type="button">Pause</button>
@@ -37,8 +37,14 @@
           <span><i class="swatch" style="background:#d4b3ff"></i>6 GHz</span>
           <span>pulse = scan-to-scan flicker</span>
         </div>
-        <p class="radar-note">Radial distance represents signal strength only. Angular position is for visual separation and does not represent physical direction.</p>
-        <div class="radar-wrap"><canvas id="radar"></canvas></div>
+        <p class="radar-note">Range is RSSI. Angle is body-relative after you lock an AP or enable the compass. Most desktop PCs have no gyro — use the heading slider or open this page on a phone.</p>
+        <div class="radar-wrap" id="signal-wrap"><canvas id="radar"></canvas></div>
+        <div class="toolbar" id="heading-bar">
+          <button id="enable-gyro" type="button">Enable gyro / compass</button>
+          <button id="lock-ahead" type="button">Lock linked AP ahead</button>
+          <label>Heading <input id="heading" type="range" min="0" max="359" step="1" value="0" /></label>
+          <span id="heading-readout" class="hint">0° · manual</span>
+        </div>
       </section>
       <div class="stack">
         <section class="panel">
@@ -73,7 +79,7 @@
         </section>
         <section class="panel">
           <h2>Network nodes</h2>
-          <p class="radar-note">Each machine is its own radio. Shared snapshots are RSSI + motion + AP list. Position is empty until you add rooms later.</p>
+          <p class="radar-note">Each machine is its own radio. Shared snapshots are RSSI + motion + AP list.</p>
           <div class="toolbar">
             <label>Name <input id="node-id" type="text" /></label>
             <label>Hub URL <input id="hub-url" type="text" placeholder="http://192.168.1.20:8765" /></label>
@@ -182,7 +188,7 @@
       this.pulses = new Map();
       this.radii = new Map();
     }
-    draw(aps, now) {
+    draw(aps, now, heading = 0, locks = {}) {
       const fitted = fit(this.canvas);
       if (!fitted) return;
       const { ctx, w, h } = fitted;
@@ -211,8 +217,17 @@
       ctx.stroke();
       ctx.fillStyle = "rgba(150, 190, 170, 0.45)";
       ctx.font = "11px 'Segoe UI', sans-serif";
+      ctx.fillStyle = "rgba(150, 190, 170, 0.7)";
+      ctx.textAlign = "center";
+      ctx.fillText("FWD", cx, cy - maxR + 14);
+      const nRad = ((0 - heading) * Math.PI) / 180;
+      ctx.fillStyle = "#ffc46b";
+      ctx.fillText("N", cx + Math.sin(nRad) * (maxR - 14), cy - Math.cos(nRad) * (maxR - 14) + 4);
+      ctx.fillStyle = "rgba(150, 190, 170, 0.45)";
+      ctx.textAlign = "left";
       ctx.fillText("−25 dBm", cx + 8, cy - maxR * 0.08);
       ctx.fillText("−95 dBm", cx + 8, cy - maxR + 12);
+      ctx.fillText(`${Math.round(((heading % 360) + 360) % 360)}°`, cx + 8, cy + maxR - 8);
       ctx.restore();
       const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, maxR);
       grad.addColorStop(0, "rgba(80,255,170,0.12)");
@@ -228,14 +243,17 @@
       ctx.fill();
       ctx.restore();
       for (const ap of aps) {
-        const angle = bssidAngle(ap.bssid);
+        const key = String(ap.bssid || "").toLowerCase();
+        const world = locks[key] != null ? locks[key] : (ap.bearing_deg != null ? ap.bearing_deg : (bssidAngle(ap.bssid) / (Math.PI * 2)) * 360);
+        let rel = ((world - heading) % 360 + 360) % 360; if (rel > 180) rel -= 360;
+        const angle = (rel * Math.PI) / 180;
         const rssi = ap.smoothed_rssi ?? ap.rssi;
         const target = rssiRadius(rssi, maxR);
         const prevR = this.radii.get(ap.bssid) ?? target;
         const r = prevR + (target - prevR) * 0.14;
         this.radii.set(ap.bssid, r);
-        const x = cx + Math.cos(angle) * r;
-        const y = cy + Math.sin(angle) * r;
+        const x = cx + Math.sin(angle) * r;
+        const y = cy - Math.cos(angle) * r;
         const flicker = ap.variance > 1.1 || (ap.linked && ap.variance > 0.4);
         const prev = this.pulses.get(ap.bssid) ?? 0;
         const pulse = flicker ? Math.min(1, prev + 0.08) : Math.max(0, prev - 0.04);
@@ -432,9 +450,150 @@
     }
   }
 
+
+  class HouseView {
+    constructor(canvas) {
+      this.canvas = canvas;
+      this.plates = [];
+      this.sweep = 0;
+    }
+    layout(house, cssW, cssH) {
+      const floors = [...(house.floors || [])].sort((a, b) => b.z - a.z);
+      const fw = house.footprint?.w || Math.max(...floors.map((f) => f.w), 12);
+      const fd = house.footprint?.d || Math.max(...floors.map((f) => f.d), 10);
+      const pad = 18, gap = 18, labelH = 18;
+      const n = Math.max(1, floors.length);
+      const availH = cssH - pad * 2 - labelH * n - gap * (n - 1);
+      const plateH = availH / n;
+      const scale = Math.min((cssW - pad * 2) / fw, plateH / fd);
+      const w = fw * scale, h = fd * scale;
+      const left = pad + Math.max(0, (cssW - pad * 2 - w) / 2);
+      this.plates = floors.map((floor, i) => ({
+        floor: { ...floor, w: fw, d: fd },
+        x: left, y: pad + labelH + i * (h + labelH + gap), w, h, scale,
+      }));
+      return this.plates;
+    }
+    hit(cssX, cssY) {
+      for (const plate of this.plates) {
+        if (cssX < plate.x || cssY < plate.y || cssX > plate.x + plate.w || cssY > plate.y + plate.h) continue;
+        return { floor: plate.floor.id, x: Math.round(((cssX - plate.x) / plate.scale) * 10) / 10, y: Math.round(((cssY - plate.y) / plate.scale) * 10) / 10 };
+      }
+      return null;
+    }
+    draw(house, fix, nodes, now) {
+      const fitted = fit(this.canvas);
+      if (!fitted) return;
+      const { ctx, w: cssW, h: cssH } = fitted;
+      ctx.clearRect(0, 0, cssW, cssH);
+      ctx.fillStyle = "rgba(8, 18, 16, 0.96)";
+      ctx.fillRect(0, 0, cssW, cssH);
+      if (!house?.floors?.length) return;
+      this.sweep = (this.sweep + 0.018) % (Math.PI * 2);
+      const plates = this.layout(house, cssW, cssH);
+      const rooms = house.rooms || [];
+      const toPx = (plate, x, y) => [plate.x + x * plate.scale, plate.y + y * plate.scale];
+      const clip = (plate) => { ctx.beginPath(); ctx.rect(plate.x, plate.y, plate.w, plate.h); ctx.clip(); };
+      for (const plate of plates) {
+        ctx.save();
+        ctx.fillStyle = "rgba(12, 22, 20, 0.95)";
+        ctx.strokeStyle = "rgba(110, 230, 170, 0.22)";
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(plate.x, plate.y, plate.w, plate.h, 8);
+        else ctx.rect(plate.x, plate.y, plate.w, plate.h);
+        ctx.fill(); ctx.stroke();
+        ctx.fillStyle = "rgba(150, 190, 170, 0.72)";
+        ctx.font = "12px 'Segoe UI', sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText(`floor ${plate.floor.name}   z=${plate.floor.z}m`, plate.x, plate.y - 6);
+        ctx.fillStyle = "rgba(150, 190, 170, 0.28)";
+        ctx.textAlign = "right";
+        ctx.fillText("rest of house", plate.x + plate.w - 8, plate.y + 16);
+        ctx.restore();
+        ctx.save(); clip(plate);
+        ctx.translate(plate.x + plate.w / 2, plate.y + plate.h / 2);
+        ctx.rotate(this.sweep);
+        const maxR = Math.hypot(plate.w, plate.h);
+        const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, maxR);
+        grad.addColorStop(0, "rgba(80,255,170,0.16)");
+        grad.addColorStop(1, "rgba(80,255,170,0)");
+        ctx.fillStyle = grad;
+        ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, maxR, -0.38, 0.04); ctx.closePath(); ctx.fill();
+        ctx.restore();
+        for (const room of rooms.filter((r) => r.floor === plate.floor.id)) {
+          const [x, y] = toPx(plate, room.x, room.y);
+          ctx.save();
+          ctx.fillStyle = "rgba(30, 70, 55, 0.55)";
+          ctx.strokeStyle = "rgba(110, 255, 176, 0.55)";
+          ctx.beginPath();
+          if (ctx.roundRect) ctx.roundRect(x, y, room.w * plate.scale, room.d * plate.scale, 6);
+          else ctx.rect(x, y, room.w * plate.scale, room.d * plate.scale);
+          ctx.fill(); ctx.stroke();
+          ctx.fillStyle = "rgba(232, 255, 244, 0.8)";
+          ctx.font = "12px 'Segoe UI', sans-serif";
+          ctx.textAlign = "left";
+          ctx.fillText(room.name, x + 8, y + 16);
+          ctx.restore();
+        }
+      }
+      for (const ring of fix?.rings || []) {
+        const plate = plates.find((p) => p.floor.id === ring.floor);
+        if (!plate) continue;
+        const [x, y] = toPx(plate, ring.x, ring.y);
+        ctx.save(); clip(plate);
+        ctx.strokeStyle = ring.linked ? "rgba(124, 255, 184, 0.7)" : "rgba(126, 203, 255, 0.45)";
+        ctx.fillStyle = ring.linked ? "rgba(124, 255, 184, 0.07)" : "rgba(126, 203, 255, 0.05)";
+        ctx.beginPath(); ctx.arc(x, y, ring.r_outer * plate.scale, 0, Math.PI * 2);
+        ctx.arc(x, y, ring.r_inner * plate.scale, 0, Math.PI * 2, true); ctx.fill();
+        ctx.beginPath(); ctx.arc(x, y, ring.r_outer * plate.scale, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+      }
+      for (const anchor of house.anchors || []) {
+        const plate = plates.find((p) => p.floor.id === anchor.floor);
+        if (!plate) continue;
+        const [x, y] = toPx(plate, anchor.x, anchor.y);
+        ctx.fillStyle = "#ffc46b"; ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "rgba(230, 240, 235, 0.88)"; ctx.font = "11px 'Segoe UI', sans-serif"; ctx.textAlign = "left";
+        ctx.fillText(anchor.label, x + 8, y + 4);
+      }
+      const markers = (nodes || []).filter((n) => n.position && n.position.x != null);
+      const walker = markers.find((n) => !n.local) || markers[0];
+      for (const node of markers) {
+        const pos = node.position;
+        const plate = plates.find((p) => p.floor.id === (pos.floor || ""));
+        if (!plate) continue;
+        const primary = node === walker;
+        const [x, y] = toPx(plate, Number(pos.x), Number(pos.y));
+        ctx.save(); clip(plate);
+        ctx.fillStyle = primary ? "rgba(110, 255, 176, 0.28)" : "rgba(255, 196, 107, 0.18)";
+        ctx.beginPath(); ctx.arc(x, y, Math.max(12, Math.min(Number(pos.uncertainty ?? 1.4), 3.5) * plate.scale), 0, Math.PI * 2);
+        ctx.fill();
+        if (primary) { ctx.strokeStyle = "#7cffb8"; ctx.stroke(); }
+        ctx.restore();
+        const pulse = primary ? 2.4 + Math.sin(now * 8) * 1.4 : 0;
+        ctx.beginPath(); ctx.fillStyle = primary ? "#e8fff4" : "#ffc46b";
+        ctx.arc(x, y, 4 + pulse * 0.25, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "rgba(232,255,244,0.85)"; ctx.font = "11px 'Segoe UI', sans-serif"; ctx.textAlign = "center";
+        ctx.fillText(node.local ? "this PC" : node.id, x, y + 18);
+      }
+    }
+  }
+
   const radar = new RadarView(document.querySelector("#radar"));
   const wave = new WaveformView(document.querySelector("#wave"));
   const csi = new CsiHeatmap(document.querySelector("#csi"));
+  const headingIn = document.querySelector("#heading");
+  const headingReadout = document.querySelector("#heading-readout");
+  let headingDeg = 0;
+  let headingSource = "none";
+  let headingLocks = {};
+  try { headingLocks = JSON.parse(localStorage.getItem("radar-ap-bearings") || "{}"); } catch { headingLocks = {}; }
+  function setHeading(value, source) {
+    headingDeg = ((value % 360) + 360) % 360;
+    headingSource = source;
+    if (document.activeElement !== headingIn) headingIn.value = String(Math.round(headingDeg));
+    headingReadout.textContent = `${Math.round(headingDeg)}° · ${source}`;
+  }
   const statusEl = document.querySelector("#status");
   const badge = document.querySelector("#motion-badge");
   const rows = document.querySelector("#ap-rows");
@@ -460,11 +619,32 @@
   const hubUrlIn = document.querySelector("#hub-url");
   const tokenIn = document.querySelector("#share-token");
   const pushBox = document.querySelector("#push-hub");
+  const radarNote = document.querySelector("#radar-note");
+  const signalWrap = document.querySelector("#signal-wrap");
+  const houseWrap = document.querySelector("#house-wrap");
+  const houseEdit = document.querySelector("#house-edit");
+  const roomEdit = document.querySelector("#room-edit");
+  const viewSignalBtn = document.querySelector("#view-signal");
+  const viewHouseBtn = document.querySelector("#view-house");
+  const anchorSel = document.querySelector("#anchor-sel");
+  const anchorLabel = document.querySelector("#anchor-label");
+  const anchorFloor = document.querySelector("#anchor-floor");
+  const anchorX = document.querySelector("#anchor-x");
+  const anchorY = document.querySelector("#anchor-y");
+  const anchorBssids = document.querySelector("#anchor-bssids");
+  const houseCanvas = document.querySelector("#house");
+  const roomSel = document.querySelector("#room-sel");
+  const roomName = document.querySelector("#room-name");
+  const roomX = document.querySelector("#room-x");
+  const roomY = document.querySelector("#room-y");
+  const roomW = document.querySelector("#room-w");
+  const roomD = document.querySelector("#room-d");
 
   let latest = null;
   let applying = false;
   let sortKey = "rssi";
   let sortDir = -1;
+  let houseMode = false;
 
   function connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -484,7 +664,10 @@
     if (snap.link) wave.push(snap.t, snap.link.rssi, snap.motion);
     if (snap.csi) csi.push(snap.csi);
     else csi.clear();
-    if (!applying) syncControls(snap);
+    if (!applying) {
+      syncControls(snap);
+      /* house view removed */
+    }
     renderTable(snap);
     renderNodes(snap);
     renderMetrics(snap);
@@ -558,13 +741,89 @@
     if (document.activeElement !== input) input.value = value;
   }
 
+  function currentHouse(snap) {
+    return draftHouse || snap?.house || latest?.house || null;
+  }
+  function selectedAnchor(house) {
+    if (!house?.anchors?.length) return null;
+    return house.anchors.find((a) => a.id === anchorSel.value) || house.anchors[0];
+  }
+  function syncHouseEditor(_snap) { return; }
+  function _unusedHouseEditor(snap) {
+    if (!snap.house) return;
+    const editing = houseEdit.contains(document.activeElement) || roomEdit.contains(document.activeElement);
+    if (!draftHouse || !editing) draftHouse = structuredClone(snap.house);
+    const house = draftHouse;
+    if (document.activeElement !== anchorSel) {
+      const current = anchorSel.value;
+      anchorSel.innerHTML = house.anchors.map((a) => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.label)}</option>`).join("");
+      anchorSel.value = house.anchors.some((a) => a.id === current) ? current : (house.anchors[0]?.id || "");
+    }
+    if (document.activeElement !== anchorFloor) {
+      anchorFloor.innerHTML = house.floors.map((f) => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.name)}</option>`).join("");
+    }
+    const anchor = selectedAnchor(house);
+    if (!anchor) return;
+    fillTextIfIdle(anchorLabel, anchor.label);
+    fillIfIdle(anchorX, anchor.x);
+    fillIfIdle(anchorY, anchor.y);
+    fillTextIfIdle(anchorBssids, (anchor.bssids || []).join(", "));
+    if (document.activeElement !== anchorFloor) anchorFloor.value = anchor.floor;
+    const rooms = house.rooms || [];
+    if (document.activeElement !== roomSel) {
+      const current = roomSel.value;
+      roomSel.innerHTML = rooms.map((r) => `<option value="${escapeHtml(r.id)}">${escapeHtml(r.name)}</option>`).join("");
+      roomSel.value = rooms.some((r) => r.id === current) ? current : (rooms[0]?.id || "");
+    }
+    const room = (rooms.find((r) => r.id === roomSel.value) || rooms[0]);
+    if (room) {
+      fillTextIfIdle(roomName, room.name);
+      fillIfIdle(roomX, room.x);
+      fillIfIdle(roomY, room.y);
+      fillIfIdle(roomW, room.w);
+      fillIfIdle(roomD, room.d);
+    }
+  }
+  function applyAnchorPatch(patch) {
+    const house = currentHouse();
+    const anchor = selectedAnchor(house);
+    if (!house || !anchor) return;
+    Object.assign(anchor, patch);
+    draftHouse = house;
+    postJson("/api/control", { house });
+  }
+  function applyRoomPatch(patch) {
+    const house = currentHouse();
+    const room = (house?.rooms || []).find((r) => r.id === roomSel.value) || (house?.rooms || [])[0];
+    if (!house || !room) return;
+    Object.assign(room, patch);
+    draftHouse = house;
+    postJson("/api/control", { house });
+  }
+  function setHouseMode(on) {
+    houseMode = on;
+    viewSignalBtn.classList.toggle("active", !on);
+    viewHouseBtn.classList.toggle("active", on);
+    signalWrap.classList.toggle("hidden", on);
+    houseWrap.classList.toggle("hidden", !on);
+    houseEdit.classList.toggle("hidden", !on);
+    roomEdit.classList.toggle("hidden", !on);
+    radarNote.textContent = on
+      ? "Stacked footprint: same XY on every floor. Rooms can be smaller than the house. Sweep is cosmetic; the blob is still two fat RSSI rings."
+      : "Radial distance represents signal strength only. Angular position is for visual separation and does not represent physical direction.";
+  }
+
   function renderNodes(snap) {
     const net = snap.network || {};
     const ips = (net.lan_ips || []).join(", ") || "none";
     const listen = `${net.listen_host ?? "?"}:${net.listen_port ?? 8765}`;
-    netStatus.textContent = net.lan_open
+    const logs = (net.remote_log?.nodes || []).map((n) => `${n.id} ${n.samples} samples`).join(" · ");
+    const listenLine = net.lan_open
       ? `Listening on ${listen} · LAN IPs ${ips} · other PCs can POST here. Allow TCP ${net.listen_port} in Windows Firewall.`
       : `Listening on ${listen} (localhost only). Restart with python -m app --host 0.0.0.0 so the laptop can push. LAN IPs: ${ips}`;
+    netStatus.textContent = logs
+      ? `${listenLine} Remote log: ${net.remote_log?.directory} (${logs}).`
+      : `${listenLine} Remote snapshots are saved under recordings/remote/.`;
     nodeRows.innerHTML = (snap.nodes || []).map((node) => {
       const link = node.link;
       const motion = node.motion || {};
@@ -633,6 +892,31 @@
   hubUrlIn.addEventListener("change", () => postJson("/api/control", { hub_url: hubUrlIn.value || null }));
   tokenIn.addEventListener("change", () => postJson("/api/control", { share_token: tokenIn.value }));
   pushBox.addEventListener("change", () => postJson("/api/control", { push_to_hub: pushBox.checked }));
+  headingIn.addEventListener("input", () => setHeading(Number(headingIn.value), "manual"));
+  document.querySelector("#enable-gyro").addEventListener("click", () => {
+    const DOE = window.DeviceOrientationEvent;
+    const start = () => {
+      const onOrient = (ev) => {
+        const webkit = ev.webkitCompassHeading;
+        const heading = typeof webkit === "number" ? webkit : (typeof ev.alpha === "number" ? (360 - ev.alpha) % 360 : null);
+        if (heading == null) return;
+        setHeading(heading, "gyro");
+      };
+      window.addEventListener("deviceorientationabsolute", onOrient, true);
+      window.addEventListener("deviceorientation", onOrient, true);
+      headingReadout.textContent = `${Math.round(headingDeg)}° · listening for gyro / compass`;
+    };
+    if (DOE && typeof DOE.requestPermission === "function") {
+      DOE.requestPermission().then((state) => { if (state === "granted") start(); });
+    } else start();
+  });
+  document.querySelector("#lock-ahead").addEventListener("click", () => {
+    const bssid = latest?.link?.bssid;
+    if (!bssid) { headingReadout.textContent = `${Math.round(headingDeg)}° · no linked AP`; return; }
+    headingLocks[bssid.toLowerCase()] = headingDeg;
+    localStorage.setItem("radar-ap-bearings", JSON.stringify(headingLocks));
+    headingReadout.textContent = `${Math.round(headingDeg)}° · locked ${bssid.slice(-8)} ahead`;
+  });
   document.querySelector("#cal-start").addEventListener("click", () => postJson("/api/calibrate", { action: "start" }));
   document.querySelector("#cal-stop").addEventListener("click", () => postJson("/api/calibrate", { action: "stop" }));
   document.querySelector("#cal-reset").addEventListener("click", () => postJson("/api/calibrate", { action: "reset" }));
@@ -659,7 +943,9 @@
 
   function frame() {
     const snap = latest;
-    radar.draw(snap?.aps ?? [], performance.now() / 1000);
+    const now = performance.now() / 1000;
+    if (headingSource === "none" && snap?.heading != null) setHeading(snap.heading, "gyro");
+    radar.draw(snap?.aps ?? [], now, headingDeg, headingLocks);
     wave.draw(snap?.settings?.threshold ?? 0.35, Boolean(snap?.motion?.active));
     csi.draw(snap?.csi_status || "CSI source not connected");
     requestAnimationFrame(frame);

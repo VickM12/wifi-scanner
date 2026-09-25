@@ -11,6 +11,7 @@ export type AccessPoint = {
   variance: number;
   smoothed_rssi: number | null;
   last_seen: number | null;
+  bearing_deg?: number | null;
 };
 
 export type LinkSample = {
@@ -96,7 +97,73 @@ export type NodeReport = {
     band: string;
     linked: boolean;
   }>;
-  position: { x?: number | null; y?: number | null; z?: number | null; room?: string | null } | null;
+  position: GeometryFix | null;
+};
+
+export type HouseFloor = {
+  id: string;
+  name: string;
+  z: number;
+  w: number;
+  d: number;
+};
+
+export type HouseAnchor = {
+  id: string;
+  label: string;
+  floor: string;
+  x: number;
+  y: number;
+  bssids: string[];
+};
+
+export type HouseRoom = {
+  id: string;
+  name: string;
+  floor: string;
+  z: number;
+  x: number;
+  y: number;
+  w: number;
+  d: number;
+};
+
+export type HouseConfig = {
+  footprint?: { w: number; d: number };
+  floors: HouseFloor[];
+  rooms?: HouseRoom[];
+  anchors: HouseAnchor[];
+};
+
+export type GeometryFix = {
+  x?: number | null;
+  y?: number | null;
+  z?: number | null;
+  room?: string | null;
+  floor?: string | null;
+  uncertainty?: number | null;
+  score?: number | null;
+  candidates?: Array<{
+    x: number;
+    y: number;
+    z: number;
+    floor: string;
+    room: string;
+    uncertainty: number;
+    score: number;
+  }>;
+  rings?: Array<{
+    anchor_id: string;
+    label: string;
+    floor: string;
+    x: number;
+    y: number;
+    r_inner: number;
+    r_outer: number;
+    rssi: number;
+    band?: string | null;
+    linked?: boolean;
+  }>;
 };
 
 export type NetworkInfo = {
@@ -104,6 +171,11 @@ export type NetworkInfo = {
   listen_port: number;
   lan_ips: string[];
   lan_open: boolean;
+  remote_log?: {
+    enabled: boolean;
+    directory: string;
+    nodes: Array<{ id: string; samples: number; path: string | null }>;
+  };
 };
 
 export type CalibrationStatus = {
@@ -139,4 +211,7 @@ export type Snapshot = {
   csi_status: string;
   nodes: NodeReport[];
   network: NetworkInfo;
+  house?: HouseConfig | null;
+  fix?: GeometryFix | null;
+  heading?: number | null;
 };
